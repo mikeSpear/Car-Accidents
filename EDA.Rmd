@@ -1,0 +1,586 @@
+---
+title: "Victorian Road Accident Analysis"
+output: pdf_document
+---
+## Import Packages and Data
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyr)
+library(dplyr)
+library(readxl)
+library(lubridate)
+library(ggplot2)
+library(scales)
+library(janitor)
+library(readr)
+library(readxl)
+library(stringr)
+library(runner)
+```
+
+```{r}
+#loc <- c("C:\\Users\\MichaelSpear\\OneDrive - AGRICOMM TRADING\\Desktop\\Case Study")
+excel_file_name <- 'Dataset A_BNE - Road Accident Data (1).xlsx'
+df_crash_vic_raw <- clean_names(read_excel(paste0(excel_file_name),
+                                           sheet = "Data"))
+data_def <- clean_names(read_excel(paste0(excel_file_name),
+                                           sheet = "Description"))
+```
+
+# Data Understanding
+Just trying to understand the distribution of data and make sure columns are correct 
+
+##Checking the data dictionary
+```{r}
+data_def
+```
+
+#confirming columns have correct data types
+```{r}
+head(df_crash_vic_raw)
+```
+accident_date, accident_time, severity are in the wrong data types. Speed zone is both a numeric and a character depending on the task.
+Accident number does not iterate up by 1. Presumably this data comes from a database of total accidents and was then filtered down for only vehicle accidents
+
+```{r}
+str(df_crash_vic_raw)
+```
+Seems like most of the characters are actually factors. Some of them are effectively duplicates of the others as they are descriptions.
+It is not worth noting that for most scenarios, factors and characters are mostly treated the same in R functions. But its still good to understand if the data is fundamentally a factor or a character.
+```{r}
+df_type <- sapply(df_crash_vic_raw, class)
+
+for(j in seq_along(names(df_crash_vic_raw))){
+  if(df_type[j] == "character"){
+      print(names(df_crash_vic_raw)[j])
+      print(dim(unique(df_crash_vic_raw[,j])))
+  }
+}
+```
+dca_code_description, road_names, lga, and page are probably not factors.
+dca_code_description may be related to the dca code type. For example a code description may only be related to 1 code type.
+
+```{r}
+dim(unique(data_frame(df_crash_vic_raw$dca_code_type, df_crash_vic_raw$dca_code_description)))[1]
+length(unique(df_crash_vic_raw$dca_code_description))
+```
+Apparently not.Its 1 off. But it does therefore seem to be a factor
+Sometimes just viewing small data sets is a good way of getting quick insights, bigger data sets may require an algorithmic solution to identify these issues.
+```{r}
+View(unique(data_frame(df_crash_vic_raw$dca_code_type, df_crash_vic_raw$dca_code_description)))
+```
+So the answer is its mostly true, the only exception is off path on curve and off path on straight both have potential "off path on curve" and "off path on straight" as options
+
+Let's check severity description and severity are related.
+```{r}
+dim(unique(data_frame(df_crash_vic_raw$severity_description, df_crash_vic_raw$severity)))[1]
+length(unique(df_crash_vic_raw$severity_description))
+```
+They have a 1:1 relationship.
+
+
+##fixing data types
+Converting all to characters, if needing factors later will convert later.
+```{r}
+# For the times, its easier to create an hour column for this kind of analysis rather than trying to extract strings and convert times. Don't believe we need minute level granularity
+df_crash_vic_raw$hour_number <- as.character(hour(df_crash_vic_raw$accident_time))
+df_crash_vic_raw$severity <- as.character(df_crash_vic_raw$severity)
+df_crash_vic_raw$speed_zone_char <- as.character(df_crash_vic_raw$speed_zone) #want to keep numeric version for later analysis
+df_crash_vic_raw$accident_date2 <- as.Date(df_crash_vic_raw$accident_date)
+```
+#Nulls and NAs
+```{r}
+colSums(is.na(df_crash_vic_raw))
+dim(df_crash_vic_raw)
+```
+The direction of the accident is missing more than half the time. If further analysis proves this to be useful, **may need to mandate direction being recorded.**  
+**Most accidents have 2 streets involved**, as road_type2 is in approx 95% of accidents.
+Interestingly road_type_2 is often missed in the data.
+```{r}
+miss_road_type2 <- df_crash_vic_raw %>%
+  filter(is.na(road_type_2))
+View(miss_road_type2)
+```
+seems that there is a lot of "unnamed road" in missing road type 2
+```{r}
+miss_road_type3 <- miss_road_type2 %>%
+  group_by(road_name_2) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) 
+miss_road_type3 %>%
+  mutate(percent = count / sum(miss_road_type3$count))
+```
+The majority of road names is unknown as well. 
+**recommend improving the quality of gathering data on the 2nd road involved in an accident, as 95% of accidents feature 2 roads**  
+It is possible that "Unnamed" means something different to what it sounds like, for instance it may be used for no road or a driveway. Perhaps call it a driveway instead or no second road if those are true. 
+```{r}
+df_crash_vic_raw %>%
+  group_by(road_name_2) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count)) 
+```
+A way of checking if it does mean something different is to see if "UNNAMED" is related to "Road Geometry Description" 
+The obvious one is "Not at intersection". If unnamed is really NA, it should be strongly associated with this. The data seems to support this.
+```{r}
+df_crash_vic_raw %>%
+  group_by(road_geometry_description, road_name_2) %>%
+  summarise(count = n()) %>%
+  mutate(prop = count / length(df_crash_vic_raw$road_geometry_description)) %>%
+  arrange(desc(prop)) %>%
+  filter(road_geometry_description == "Not at intersection")
+```
+Another way to do this is to see what "Unnamed" is associated
+```{r}
+df_crash_vic_raw %>%
+  group_by(road_geometry_description, road_name_2) %>%
+  summarise(count = n()) %>%
+  mutate(prop = count / length(df_crash_vic_raw$road_name_2)) %>%
+  arrange(desc(prop)) %>%
+  filter(road_name_2 == "UNNAMED") %>%
+  ggplot(aes(road_geometry_description, count)) + geom_col() +
+  ggtitle("Unnamed Accidents by road geometry description")
+```
+Some are at different types of road geometry. 
+It is possible that the "Unnamed" roads are driveways, other kinds of roads, people entering "Unnamed" instead of NA or other.
+
+```{r}
+df_crash_vic_raw %>%
+  group_by(road_geometry_description, road_name_2) %>%
+  summarise(count = n()) %>%
+  mutate(prop = count / length(df_crash_vic_raw$road_name_2)) %>%
+  arrange(desc(prop)) %>%
+  filter(road_name_2 == "MONASH") %>%
+  ggplot(aes(road_geometry_description, count)) + geom_col() +
+  ggtitle("Monash Accidents by road geometry description")
+```
+```{r}
+df_crash_vic_raw %>%
+  group_by(road_geometry_description, road_name_2) %>%
+  summarise(count = n()) %>%
+  mutate(prop = count / length(df_crash_vic_raw$road_name_2)) %>%
+  arrange(desc(prop)) %>%
+  filter(road_name_2 == "WESTERN RING") %>%
+  ggplot(aes(road_geometry_description, count)) + geom_col() +
+  ggtitle("Western Ring Accidents by road geometry description")
+```
+The proportions for Unnamed does seem to be different to the other ones. Not at intersection is still much larger but the other categories seem different
+##graphical data quality checking
+```{r}
+str(df_crash_vic_raw)
+```
+create lots of histograms to check the distribution for outliers.  
+There does seem to be outliers but they seem to be more distribution related than errors in data entry. I'm basing this on that they "feel" right.
+If there was a 100 people dead or 200 cars I would probably google it to check the news.  
+Key thoughts  
+* most accidents don't have deaths  
+* 1 serious injury is farily common  
+* at least 1 person not injured is very common  
+* Most accidents involve 1 or 2 cars  
+* Most accidents are at 60km/hr _this may be related to most roads are 50 & 60km/hr based on personal experience rather than related to the actual speed_  
+Feels like 100km/hr road are overestimated and maybe 50km/hr roads are underestimated. **Recommendation merge with other data and check if that is true. Then maybe try to lower speed limits if true but may be out of Local governments responsibilities.**
+```{r}
+df_numerical_values <- df_crash_vic_raw %>%
+  select(no_persons_involved, no_persons_killed, no_persons_inj_serious, no_persons_inj_medical_attention, no_persons_not_inj, no_of_vehicles, speed_zone)
+Hmisc::hist.data.frame(df_numerical_values)
+```
+create a quick scatterplot matrix with correlations and histograms just to see if there was anything interesting
+```{r}
+pairs(df_numerical_values, pch = 19, lower.panel = NULL)
+```
+A few key thoughts involved  
+* no of people is correlated with most features but very strongly with no persons  
+* speed seems very important  
+* most others don't seem that correlated  
+
+## Other Checks
+I always recommend just looking at the data, and not just using head and str functions or graphs. If it's a particularly big file, maybe try to look at 1000 random rows. The main reason is that there can be things in the data you would never consider until you see it, so looking at data in as many ways as possible can give different insights.
+```{r}
+View(df_crash_vic_raw)
+```
+This is a good example, one interesting thing to note is that accident date and accident no don't follow the same order. 
+For instance T20110000216 has an accident date on the 3/1/11 while T20110000219 has a date on the 1/1/11. This implies either late or wrong data entry. 
+**So we know the dataset is filtered from a bigger data set (judging by the missing accident number) and data may be entered late or wrong.**
+This means we might need to reconcile it against other datasets to see if its potentially biased or otherwise wrong.
+
+From https://www.vicroads.vic.gov.au/-/media/files/documents/safety-and-road-rules/victorianroadsafetytrauma2015.ashx we can get some alternate data for 2011 and 12 combined
+```{r}
+sum(df_crash_vic_raw$no_persons_killed) #569 deaths according to trauma report
+sum(df_crash_vic_raw$no_persons_inj_serious) #10500 severe injuries according to trauma report
+```
+There is a potentially large difference in severe injuries between the 2 datasets. This is important, as it is **potentially possible that the PWC data is biased in some way**. If this is a biased sample, the analysis may be wrong but whatever the bias causes/
+
+
+# Data Analysis
+## Questions want to ask  
+* Does the primary KPI (number of accidents) correlate with secondary KPIs (fatalities and injuries)  
+* Does the time of day/month/weekday effect no.accidents, number of people involved, and injuries/fatalities
+* Does the direction of travel impact things (i.e. during sunrise do more accidents occur if the car is driving east and the light gets in their eyes)
+* Do the different factor variables correlate with the primary and secondary KPIs
+* Does the weather matter? (may not have time to look into this)
+* Does speed matter?
+A lot of these can be subset even more, for example, speed and accident type
+
+## Does the primary KPI (number of accidents) correlate with secondary KPIs (fatalities and injuries)
+Best way to do this might be to create a correlation matrix of number of accidents / day with seconday KPIs.
+It is possible that the correlation may be stronger under certain circumstances
+```{r echo=FALSE}
+df_corr <- df_crash_vic_raw %>%
+  group_by(accident_date2) %>%
+  summarise(accidents = n(),
+            people = sum(no_persons_involved), 
+            deaths  = sum(no_persons_killed),
+            serious  = sum(no_persons_inj_serious), 
+            med  = sum(no_persons_inj_medical_attention), 
+            not_inj = sum(no_persons_not_inj), 
+            vehicles  = sum(no_of_vehicles))
+df_corr <- cor(df_corr[,-1])
+corrplot::corrplot.mixed(df_corr, lower = 'circle', upper = 'number', title = "Correlation Plot", mar=c(0,0,1,0))
+```
+Interestingly accidents/day is **weakly correlated with deaths, moderately with serious injuries, and highly with medical injuries**.  
+**Recommendation: Create a different primary KPI, if the primary goal is to reduce deaths and serious injuries.**  
+Serious injuries seems to be moderately correlated with amount of vehicles and amount of people too, this may be related to numbers of accidents though (e.g. accidents is moderately correlated to serious injuries, but accidents is highly correlated to vehicles and people, therefore vehicles is moderately correlated but slightly weaker to serious injuries, which is what we see).  
+**Recommendation: If reducing the number of accidents is the goal. Reduce the number of vehicles by encouraging alternate transportation method by changing where parking and road maintenance is spent (i.e. things within their control).  The places it should be spent should be targeted towards encouraging public transportation. This will also reduce medical accidents majorly and serious moderately but may have political consequences**
+
+## Does the time of day/month/weekday effect no.accidents, number of people involved, and injuries/fatalities
+### Going to try to show a heatmap of no.accidents per hour per day
+```{r}
+no_accidents <- df_crash_vic_raw %>%
+  mutate(day_of_week = wday(accident_date2)) %>%
+  mutate(hour_number = as.numeric(hour_number)) %>%
+  group_by(hour_number, day_of_week) %>%
+  summarise(count_of_accidents = n()) %>%
+  pivot_wider(names_from = day_of_week, values_from = count_of_accidents, values_fill = 0)
+no_accidents <- data.matrix(no_accidents)[, 2:8]
+colnames(no_accidents) <- c("Sun", "Mon", "Tues", "Wed", "Thurs", "Fri", "Sat")
+rownames(no_accidents) <- seq(0,23)
+heatmap(no_accidents, Rowv=NA, Colv=NA,  scale="column", margins=c(5,10),  main = "Number of Road Accidents")
+```
+The heatmap shows that most accidents are during the rush hour in the morning during the week and after school and rush hour in the afternoon to evening. While on Saturday and Sunday, its quite different. Weekends show an increased rate during the early hours which may be related to alcohol related incidents. Saturday shows a lot of incidents around midday. While Sunday more in the late afternoon. 
+**Recommendation: Encourage public transportation during the week. Increase visibility of children and people walking. Try to decrease traffic and increase public transportation around bars/clubs/pubs on Friday night, saturday morning, saturing night, and sunday morning**
+The Saturday afternoon and Sunday afternoon increases is defintitely worth of more investigation.
+
+### Going to try to show a heatmap of no.fatalaties per hour per day
+```{r}
+deaths_df <- df_crash_vic_raw %>%
+  mutate(day_of_week = wday(accident_date2)) %>%
+  mutate(hour_number = as.numeric(hour_number)) %>%
+  group_by(hour_number, day_of_week) %>%
+  summarise(sum_deaths = sum(no_persons_killed)) %>%
+  pivot_wider(names_from = day_of_week, values_from = sum_deaths, values_fill = 0)
+deaths_df <- data.matrix(deaths_df)[, 2:8]
+colnames(deaths_df) <- c("Sun", "Mon", "Tues", "Wed", "Thurs", "Fri", "Sat")
+rownames(deaths_df) <- seq(0,23)
+heatmap(deaths_df, Rowv=NA, Colv=NA,  scale="column", margins=c(5,10), main = "Number of Deaths from Road Accidents")
+```
+The only real patterns I can see is Sunday - Wednesday 3-5pm which is very strange. Friday through Saturday morning seems to show an elevated amount.
+
+### Going to try to show a heatmap of no.Serious Injuries per hour per day
+```{r}
+serious_df <- df_crash_vic_raw %>%
+  mutate(day_of_week = wday(accident_date2)) %>%
+  mutate(hour_number = as.numeric(hour_number)) %>%
+  group_by(hour_number, day_of_week) %>%
+  summarise(sum_serious_injury = sum(no_persons_inj_serious)) %>%
+  pivot_wider(names_from = day_of_week, values_from = sum_serious_injury, values_fill = 0)
+serious_df <- data.matrix(serious_df)[, 2:8]
+colnames(serious_df) <- c("Sun", "Mon", "Tues", "Wed", "Thurs", "Fri", "Sat")
+rownames(serious_df) <- seq(0,23)
+heatmap(serious_df, Rowv=NA, Colv=NA,  scale="column", margins=c(5,10), main = "Number of Serious Injuries")
+```
+Serious injuries seem to match more closely with the number of accidents but the school leaving and afternoon rush hour seems worse.  
+Sunday morning has a real spike in deaths and serious injuries. 
+### Going to try to show a heatmap of no. Injuries Requiring Medical Attention per hour per day
+```{r}
+medical_df <- df_crash_vic_raw %>%
+  mutate(day_of_week = wday(accident_date2)) %>%
+  mutate(hour_number = as.numeric(hour_number)) %>%
+  group_by(hour_number, day_of_week) %>%
+  summarise(no_persons_inj_medical_attention = sum(no_persons_inj_medical_attention)) %>%
+  pivot_wider(names_from = day_of_week, values_from = no_persons_inj_medical_attention, values_fill = 0)
+medical_df <- data.matrix(medical_df)[, 2:8]
+colnames(medical_df) <- c("Sun", "Mon", "Tues", "Wed", "Thurs", "Fri", "Sat")
+rownames(medical_df) <- seq(0,23)
+heatmap(medical_df, Rowv=NA, Colv=NA,  scale="column", margins=c(5,10), main = "Number of Injuries Requiring Medical Attention")
+```
+Very similar to total accidents.
+##lets look at by quarter.
+If schools are important may see different seasonal trend
+```{r}
+school_df <- df_crash_vic_raw %>%
+  mutate(day_of_week = wday(accident_date2)) %>%
+  mutate(hour_number = as.numeric(hour_number)) %>%
+  mutate(months_of_year = month(accident_date)) %>% #aligns with school year
+  mutate(type_of_day = ifelse(day_of_week %in% c(1,7), "Weekend", "Weekday")) %>%
+  mutate(school_holidays = ifelse(months_of_year %in% c(1,12), "school holiday", "normal")) %>%
+  group_by(hour_number, months_of_year, day_of_week, type_of_day, school_holidays) %>%
+  summarise(no_persons_inj_medical_attention = sum(no_persons_inj_medical_attention),
+            sum_serious_injury = sum(no_persons_inj_serious),
+            sum_deaths = sum(no_persons_killed),
+            count_of_accidents = n()) 
+```
+```{r}
+ggplot(school_df, aes(hour_number, count_of_accidents, col = type_of_day)) +
+  geom_point() +
+  facet_wrap(~months_of_year) +
+  xlab("Hour of Day") + ylab("Accident Count") + 
+  ggtitle("When there are School Holidays there is less Accidents",
+          sub = "Monthly data from 2011 and 2012. Each dot is 1 hour from 1 day") +
+  labs(colour = "Weekly Cycle")
+```
+January, April, July and October all have smaller early morning peaks and potentially afternoon peaks, these months generally have school holiday. 
+If we just look at December and January, where the entire month is school holdays we can see the effect quite strongly
+
+```{r}
+ggplot(school_df, aes(hour_number, count_of_accidents, col = type_of_day)) +
+  geom_point() +
+  facet_wrap(~school_holidays) +
+  xlab("Hour of Day") + ylab("Accident Count") + 
+  ggtitle("December and January show much less accidents in the Morning and Afternoon",
+          sub = "School Holidays are December and January Only. Each dot is 1 hour from 1 day") +
+  labs(colour = "Weekly Cycle")
+```
+School holidays have a big impact on daily accidents count
+**recommendation: lots of signage, school training, and other things around schools**
+```{r}
+ggplot(school_df, aes(hour_number, sum_deaths, col = type_of_day)) +
+  geom_point() +
+  facet_wrap(~school_holidays) +
+  xlab("Hour of Day") + ylab("Death Count") + 
+  ggtitle("Deaths do not vary more than by Random Chance ",
+          sub = "School Holidays are December and January Only. Each dot is 1 hour from 1 day") +
+  labs(colour = "Weekly Cycle")
+```
+
+```{r}
+ggplot(school_df, aes(hour_number, sum_serious_injury, col = type_of_day)) +
+  geom_point() +
+  facet_wrap(~school_holidays) +
+  xlab("Hour of Day") + ylab("Count of Serious Injuries") +  
+  ggtitle("Serious Injuries do not vary more than by Random Chance ",
+          sub = "School Holidays are December and January Only. Each dot is 1 hour from 1 day") +
+  labs(colour = "Weekly Cycle")
+```
+
+```{r}
+ggplot(school_df, aes(hour_number, no_persons_inj_medical_attention, col = type_of_day)) +
+  geom_point() +
+  facet_wrap(~school_holidays) +
+  xlab("Hour of Day") + ylab("Count of Serious Injuries") +  
+  ggtitle("December and January show much less medical injuries in the Morning and Afternoon",
+          sub = "School Holidays are December and January Only. Each dot is 1 hour from 1 day") +
+  labs(colour = "Weekly Cycle")
+```
+
+Can see very clearly that December and January have a different distribution of accidents per hour per day. Mornings on weekends are clear spikes for medical injuries and accident counts.  Because of low sample counts fatalities and serious injuries are more difficult to tell.
+
+**Recommendation: More traffic lights, speed bumps, signs etc to reduce speeds around schools. Training of school children and parents about the risk. An investigative analysis of where students go after school**
+
+# Does the amount of light impact things 
+__i.e. during sunrise do more accidents occur if the car is driving east and the light gets in their eyes__
+While most accidents occur during the day it is possible that this is mainly because more people are traveling during the day and this is not a causal relationship. It seems likely that the avaliability of light may impact things but may require data on hours travelling. But could see if dusk/dawn are more likely to occur in east/west times
+```{r}
+df_crash_vic_raw %>%
+  filter(light_condition_description == "Dusk/dawn",
+         direction_location != "NA") %>%
+  group_by(direction_location) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(direction_location, count, fill = direction_location)) +
+  geom_col() + coord_flip()  +
+  xlab("Direction of Travel") + ylab("Count of Accidents") +  
+  ggtitle("Vehicles travelling West or East during Dusk/Dawn have much more accidents") +
+  labs(colour = "Weekly Cycle")
+```
+West and Eat do seem to occur proportionally more often than other choices at dawn and dusk. This does imply that maybe the light of the sun is effecting drivers. 
+
+```{r}
+df_crash_vic_raw %>%
+  filter(light_condition_description == "Dusk/dawn",
+         direction_location != "NA") %>%
+  group_by(direction_location) %>%
+  summarise(dead = sum(no_persons_killed)) %>%
+  ggplot(aes(direction_location, dead, fill = direction_location)) +
+  geom_col() + coord_flip() +
+  xlab("Direction of Travel") + ylab("Count of Deaths") +  
+  ggtitle("Vehicles travelling West or East during Dusk/Dawn have much more deaths") +
+  labs(colour = "Weekly Cycle")
+```
+```{r}
+df_crash_vic_raw %>%
+  filter(light_condition_description == "Dusk/dawn",
+         direction_location != "NA") %>%
+  group_by(direction_location) %>%
+  summarise(serious = sum(no_persons_inj_serious)) %>%
+  ggplot(aes(direction_location, serious, fill = direction_location)) +
+  geom_col() + coord_flip() +
+  xlab("Direction of Travel") + ylab("Count of Accidents") +  
+  ggtitle("Vehicles travelling West or East during Dusk/Dawn have more serious injuries") +
+  labs(colour = "Weekly Cycle")
+```
+```{r}
+df_crash_vic_raw %>%
+  filter(light_condition_description == "Dusk/dawn",
+         direction_location != "NA") %>%
+  group_by(direction_location) %>%
+  summarise(medical = sum(no_persons_inj_medical_attention)) %>%
+  ggplot(aes(direction_location, medical, fill = direction_location)) +
+  geom_col() + coord_flip() +
+  xlab("Direction of Travel") + ylab("Count of Accidents") +  
+  ggtitle("Vehicles travelling West or East during Dusk/Dawn have more medical injuries") +
+  labs(colour = "Weekly Cycle")
+```
+Both west and east effect numbers, injuries, and fatalaties. West especially seems to have a strong impact and maybe to do with people heading home from work.
+**Recommendation: Can we encourage people to start and finish work earlier? Perhaps local government takes the lead and moves the times they start work 1 hour earlier and encourage others to do the same**
+
+## Do the different factor variables correlate with the primary and secondary KPIs
+### Accident description
+```{r}
+accident_desc_df <- df_crash_vic_raw %>%
+  group_by(accident_description) %>%
+  summarise(medical = sum(no_persons_inj_medical_attention),
+            crashes = n(),
+            serious = sum(no_persons_inj_serious),
+            dead = sum(no_persons_killed)) %>%
+  pivot_longer(cols = c(medical, crashes, serious, dead), names_to = "type_of_kpi", values_to = "sum_kpi")
+```
+
+```{r}
+accident_desc_df %>%
+  filter(type_of_kpi %in% c("medical", "crashes")) %>%
+  ggplot(aes(accident_description, sum_kpi)) +
+  geom_col() + coord_flip() + facet_wrap(~type_of_kpi)
+```
+
+```{r}
+accident_desc_df %>%
+  filter(type_of_kpi %in% c("serious", "dead")) %>%
+  ggplot(aes(accident_description, sum_kpi)) +
+  geom_col() + coord_flip() + facet_wrap(~type_of_kpi)
+```
+It seems like pedestrians and fixed objects are more involved in worse crashes than at medical and overall number level.
+**This is where there is a difference between reducing crashes and overall injuries and fatalities and serious injuries**  
+**This also implies most of the accidents at school times are caused by cars hitting other cars and not cars hitting children**
+
+### accident description and early mornings on weekends
+```{r}
+weekend_accident_desc_df <- df_crash_vic_raw %>%
+  mutate(day_of_week = wday(accident_date2)) %>%
+  mutate(hour_number = as.numeric(hour_number)) %>%
+  mutate(months_of_year = month(accident_date)) %>% #aligns with school year
+  mutate(type_of_day = ifelse(day_of_week %in% c(1,7) & hour_number < 4, "weekend_early_morning", "other")) %>%
+  mutate(school_holidays = ifelse(months_of_year %in% c(1,12), "school holiday", "normal")) %>%
+  group_by(accident_description, type_of_day) %>%
+  summarise(medical = sum(no_persons_inj_medical_attention),
+            crashes = n(),
+            serious = sum(no_persons_inj_serious),
+            dead = sum(no_persons_killed)) 
+weekend_acc_summarise <- weekend_accident_desc_df %>%
+  ungroup() %>% 
+  group_by(type_of_day) %>%
+  summarise(medical_total = sum(medical),
+            crashes_total = sum(crashes),
+            serious_total = sum(serious),
+            dead_total = sum(dead)) 
+weekend_accident_desc_df <- weekend_accident_desc_df %>%
+  left_join(weekend_acc_summarise) %>%
+  mutate(medical_perc = medical / medical_total,
+            crashes_perc = crashes / crashes_total,
+            serious_perc = serious / serious_total,
+            dead_perc = dead / dead_total)
+```
+
+```{r, fig.height = 5, fig.width = 8}
+weekend_accident_desc_df %>%
+  ggplot(aes(accident_description, crashes_perc, fill = accident_description)) +
+  geom_col() + coord_flip() + facet_wrap(~type_of_day)  +
+  xlab("") + ylab("Percent of Total Accidents") +
+  ggtitle("Weekends before 4am have different accidents")+ theme(legend.position = "none")
+```
+
+```{r}
+weekend_accident_desc_df %>%
+  ggplot(aes(accident_description, medical_perc)) +
+  geom_col() + coord_flip() + facet_wrap(~type_of_day)  +
+  xlab("") + ylab("Percent of Injuries requiring Medical Attention") +
+  ggtitle("Source of Medica Injuries by Accident Type and Period")
+``` 
+
+```{r}
+weekend_accident_desc_df %>%
+  ggplot(aes(accident_description, serious_perc)) +
+  geom_col() + coord_flip() + facet_wrap(~type_of_day)  +
+  xlab("") + ylab("Percent of Total Serious Injuries") +
+  ggtitle("Serious Injuries by Accident Type and Period")
+```
+
+```{r, fig.height = 5, fig.width = 8}
+weekend_accident_desc_df %>%
+  ggplot(aes(accident_description, dead_perc, fill = accident_description)) +
+  geom_col() + coord_flip() + facet_wrap(~type_of_day) +
+  xlab("") + ylab("Percent of Deaths in Period") +
+  ggtitle("Weekend Early Mornings has a similar distribution to all Deaths") + theme(legend.position = "none")
+```
+
+The early hours of the weekend are more associated with collusion with fixed objects than other times of the day. Theirs also more striking pedestrians.
+
+**if goal is to reduce deaths and serious injuries, stopping fixed object related incidents matter more. If just accidents focus on collisions**
+
+#why does collusions with vehcilces causes deaths some times and other times does not. While fixed objects seems to be more related to very serious incidents**
+```{r}
+speed_type <- df_crash_vic_raw %>%
+  group_by(accident_description, speed_zone, speed_zone_char) %>%
+  summarise(medical = sum(no_persons_inj_medical_attention),
+            crashes = n(),
+            serious = sum(no_persons_inj_serious),
+            dead = sum(no_persons_killed)) 
+accident_type_summary <- speed_type %>%
+  ungroup() %>% 
+  group_by(accident_description) %>%
+  summarise(medical_total = sum(medical),
+            crashes_total = sum(crashes),
+            serious_total = sum(serious),
+            dead_total = sum(dead)) 
+speed_type <- speed_type %>%
+  left_join(accident_type_summary) %>%
+  mutate(medical_perc = medical / medical_total,
+            crashes_perc = crashes / crashes_total,
+            serious_perc = serious / serious_total,
+            dead_perc = dead / dead_total)
+```
+
+```{r, fig.height = 5, fig.width = 8}
+speed_type %>%
+  ggplot(aes(speed_zone, crashes_perc, fill = speed_zone_char)) +
+  geom_col() + coord_flip() + facet_wrap(~accident_description) +
+  xlab("Speed Zone") + ylab("Percent of Accidents in that Accident Type") +
+  labs(fill = "Speed Zone")
+```
+collusions with vehciles generally occur at mid speeds, while collusions with fixed objects are at high speeds.
+
+```{r, fig.height = 5, fig.width = 8}
+speed_type %>%
+  ggplot(aes(speed_zone, serious_perc, fill = speed_zone_char)) +
+  geom_col() + coord_flip() + facet_wrap(~accident_description) +
+  xlab("Speed Zone") + ylab("Percent of Serious Injuries in that Accident Type")+
+  labs(fill = "Speed Zone")
+```
+collusion with a fixed object occurs more often at high speeds resulting in a serious injury
+```{r, fig.height = 5, fig.width = 8}
+speed_type %>%
+  ggplot(aes(speed_zone, medical_perc, fill = speed_zone_char)) +
+  geom_col() + coord_flip() + facet_wrap(~accident_description) +
+  xlab("Speed Zone") + ylab("Percent of Medical Injuries in that Accident Type")+
+  labs(fill = "Speed Zone")
+```
+
+```{r, fig.height = 5, fig.width = 8}
+speed_type %>%
+  ggplot(aes(speed_zone, dead_perc, fill = speed_zone_char)) +
+  geom_col() + coord_flip() + facet_wrap(~accident_description)  +
+  xlab("Speed Zone") + ylab("Percent of Deaths in that Accident Type")+
+  labs(fill = "Speed Zone")
+```
+Speed seems to be very important for vehicle collusion becoming more serious. Less so with collusion with fixed objects, which seem to mostly happen at 100km/hr. So its probably more the speed that causes the damage than the 
+fact its a fixed object.
+
+##Is their location or dca_code types associated with the high speed incidents?
