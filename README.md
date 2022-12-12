@@ -5,4 +5,4 @@ This was based on a case study I was given. Thise case study's question was "A g
 
 
 12/12/22 Comments
-Updated One Pager to make it more annoymouse. Data set is an older version of the publically avaliable dataset avaliable at https://public.tableau.com/views/CrashstatMainlandingpage/Mainpage?:embed=y&:display_count=yes&:showTabs=y&:showVizHome=no#1&%3Adisplay_count=yes&%3Atoolbar=no&%3Arender=false
+Updated One Pager to make it more anonymous. Data set is an older version of the publically avaliable dataset avaliable at https://public.tableau.com/views/CrashstatMainlandingpage/Mainpage?:embed=y&:display_count=yes&:showTabs=y&:showVizHome=no#1&%3Adisplay_count=yes&%3Atoolbar=no&%3Arender=false
