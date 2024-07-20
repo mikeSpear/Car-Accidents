@@ -20,7 +20,7 @@ library(runner)
 ```
 
 ```{r}
-#loc <- c("C:\\Users\\MichaelSpear\\OneDrive - AGRICOMM TRADING\\Desktop\\Case Study")
+#loc <- #dataset
 excel_file_name <- 'Dataset A_BNE - Road Accident Data (1).xlsx'
 df_crash_vic_raw <- clean_names(read_excel(paste0(excel_file_name),
                                            sheet = "Data"))
